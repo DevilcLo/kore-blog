@@ -14,6 +14,10 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#if defined(__linux__)
+#define _GNU_SOURCE
+#endif
+
 #include <sys/types.h>
 #include <sys/queue.h>
 #include <sys/stat.h>
