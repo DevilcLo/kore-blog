@@ -27,23 +27,25 @@ p {
 	margin-top: 25px;
 }
 
-pre {
+p.date {
+	margin-top: 0px;
 	font-size: 14px;
-	white-space: pre-wrap;
-	white-space: -moz-pre-wrap;
-	white-space: -pre-wrap;
-	white-space: -o-pre-wrap;
-	word-wrap: break-word;
+}
+
+img.logo {
+	width: 320px;
+	height: auto;
 }
 
 code {
+	margin-top: 15px;
+	margin-bottom: 15px;
 	background-color: #303030;
 	border: 1px solid #303030;
 	border-radius: 5px;
 	color: #fff;
 	font-size: 12px;
 	width: 100%;
-	min-height: 200px;
 	display: block;
 	padding: 5px 10px 5px 10px;
 }
