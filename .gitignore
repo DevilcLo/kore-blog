@@ -1,0 +1,9 @@
+*.o
+.flavor
+.objs
+blog.so
+blog
+assets.h
+cert
+blogs
+dh2048.pem

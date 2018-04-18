@@ -1,0 +1,49 @@
+* {
+	margin: 0px;
+	padding: 0px;
+	font-family: "Courier New", Courier, monospace
+}
+
+body {
+	margin-top: 75px;
+	margin-left: auto;
+	margin-right: auto;
+	width: 600px;
+	font-size: 18px;
+	background-color: #101010;
+	color: #fff;
+}
+
+h2.title {
+	margin-bottom: 15px;
+	font-family: "Lucida Sans Unicode", "Lucida Grande", sans-serif;
+}
+
+a, a:visited {
+	color: #40e0d0;
+}
+
+p {
+	margin-top: 25px;
+}
+
+pre {
+	font-size: 14px;
+	white-space: pre-wrap;
+	white-space: -moz-pre-wrap;
+	white-space: -pre-wrap;
+	white-space: -o-pre-wrap;
+	word-wrap: break-word;
+}
+
+code {
+	background-color: #303030;
+	border: 1px solid #303030;
+	border-radius: 5px;
+	color: #fff;
+	font-size: 12px;
+	width: 100%;
+	min-height: 200px;
+	display: block;
+	padding: 5px 10px 5px 10px;
+}
