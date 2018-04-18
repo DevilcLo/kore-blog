@@ -30,6 +30,8 @@
 #include "assets.h"
 
 #define BLOG_DIR		"blogs"
+#define BLOG_VER		"kore-blog v0.1"
+
 #define POST_FLAG_DRAFT		0x0001
 
 struct post {
@@ -180,6 +182,9 @@ post_cache(struct post *post)
 
 	close(fd);
 
+	kore_buf_appendf(post->cache,
+	    (const char *)asset_blog_version_html, BLOG_VER);
+
 	kore_buf_append(post->cache, asset_post_end_html,
 	    asset_len_post_end_html);
 }
@@ -296,6 +301,7 @@ list_posts(struct http_request *req, const char *type, int flags)
 		    type, post->uri, post->title);
 	}
 
+	kore_buf_appendf(&buf, (const char *)asset_blog_version_html, BLOG_VER);
 	kore_buf_append(&buf, asset_index_end_html, asset_len_index_end_html);
 
 	http_response_header(req, "content-type", "text/html; charset=utf-8");
