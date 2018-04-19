@@ -318,7 +318,7 @@ list_posts(struct http_request *req, const char *type, int flags)
 		return (KORE_RESULT_OK);
 	}
 
-	kore_buf_init(&buf, 128);
+	kore_buf_init(&buf, 4096);
 	kore_buf_append(&buf, asset_index_top_html, asset_len_index_top_html);
 
 	TAILQ_FOREACH(post, &posts, list) {
