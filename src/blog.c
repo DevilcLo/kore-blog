@@ -62,6 +62,7 @@ int	post_list(struct http_request *);
 int	post_render(struct http_request *);
 int	draft_list(struct http_request *);
 int	draft_render(struct http_request *);
+int	referer(struct http_request *, const void *);
 int	list_posts(struct http_request *, const char *, int);
 
 static TAILQ_HEAD(, post)	posts;
@@ -261,6 +262,28 @@ post_remove(struct post *post)
 	kore_free(post->file);
 	kore_free(post->uri);
 	kore_free(post);
+}
+
+int
+referer(struct http_request *req, const void *unused)
+{
+	const char		*ref, *p;
+
+	if (!http_request_header(req, "referer", &ref))
+		return (KORE_RESULT_OK);
+
+	p = ref;
+
+	while (*p != '\0') {
+		if (!isprint(*(const unsigned char *)p++)) {
+			ref = "[not printable]";
+			break;
+		}
+	}
+
+	kore_log(LOG_NOTICE, "blog (%s) visit from %s", req->path, ref);
+
+	return (KORE_RESULT_OK);
 }
 
 int
