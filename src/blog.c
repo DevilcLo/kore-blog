@@ -25,10 +25,11 @@
 #include <kore/kore.h>
 #include <kore/http.h>
 
+#include <ctype.h>
 #include <fts.h>
 #include <fcntl.h>
-#include <ctype.h>
 #include <signal.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "assets.h"
@@ -38,24 +39,35 @@
 
 #define POST_FLAG_DRAFT		0x0001
 
+struct cache {
+	u_int32_t		refs;
+	struct kore_buf		buf;
+};
+
 struct post {
 	int			flags;
+	size_t			coff;
+	size_t			clen;
+	time_t			mtime;
 	char			*uri;
 	char			*file;
 	char			*title;
-	struct kore_buf		*cache;
+	struct cache		*cache;
 	TAILQ_ENTRY(post)	list;
 };
 
 void	index_rebuild(void);
 void	signal_handler(int);
 void	tick(void *, u_int64_t);
+int	cache_sent(struct netbuf *);
 int	fts_compare(const FTSENT **, const FTSENT **);
 
+struct cache	*cache_create(size_t);
 struct post	*post_register(char *);
 void		post_cache(struct post *);
 void		post_remove(struct post *);
 int		post_send(struct http_request *, const char *, int);
+void		cache_ref_drop(struct cache **);
 
 int	redirect(struct http_request *);
 int	post_list(struct http_request *);
@@ -63,10 +75,13 @@ int	post_render(struct http_request *);
 int	draft_list(struct http_request *);
 int	draft_render(struct http_request *);
 int	referer(struct http_request *, const void *);
-int	list_posts(struct http_request *, const char *, int);
+int	list_posts(struct http_request *, const char *, struct cache **, int);
 
 static TAILQ_HEAD(, post)	posts;
 static volatile sig_atomic_t	blog_sig = -1;
+
+static struct cache		*live_index = NULL;
+static struct cache		*draft_index = NULL;
 
 void
 signal_handler(int sig)
@@ -102,6 +117,43 @@ kore_worker_configure(void)
 	index_rebuild();
 }
 
+struct cache *
+cache_create(size_t len)
+{
+	struct cache		*cache;
+
+	cache = kore_calloc(1, sizeof(*cache));
+
+	cache->refs++;
+	kore_buf_init(&cache->buf, len);
+
+	return (cache);
+}
+
+void
+cache_ref_drop(struct cache **ptr)
+{
+	struct cache	*cache = *ptr;
+
+	cache->refs--;
+
+	if (cache->refs == 0) {
+		kore_buf_cleanup(&cache->buf);
+		kore_free(cache);
+		*ptr = NULL;
+	}
+}
+
+int
+cache_sent(struct netbuf *nb)
+{
+	struct cache	*cache = (struct cache *)nb->extra;
+
+	cache_ref_drop(&cache);
+
+	return (KORE_RESULT_OK);
+}
+
 int
 fts_compare(const FTSENT **a, const FTSENT **b)
 {
@@ -126,6 +178,12 @@ index_rebuild(void)
 	char		*path[] = { BLOG_DIR, NULL };
 
 	kore_log(LOG_INFO, "rebuilding post list");
+
+	if (live_index != NULL)
+		cache_ref_drop(&live_index);
+
+	if (draft_index != NULL)
+		cache_ref_drop(&draft_index);
 
 	if ((fts = fts_open(path,
 	    FTS_NOCHDIR | FTS_PHYSICAL, fts_compare)) == NULL) {
@@ -154,8 +212,9 @@ void
 post_cache(struct post *post)
 {
 	int		fd;
+	struct stat	st;
 	ssize_t		bytes;
-	u_int8_t	buf[1024];
+	u_int8_t	buf[4096];
 
 	if ((fd = open(post->file, O_RDONLY)) == -1) {
 		kore_log(LOG_ERR, "failed to open '%s' (%s)",
@@ -164,9 +223,20 @@ post_cache(struct post *post)
 		return;
 	}
 
-	post->cache = kore_buf_alloc(1024);
-	kore_buf_appendf(post->cache,
+	if (fstat(fd, &st) == -1) {
+		kore_log(LOG_ERR, "fstat(%s): %s", post->file, errno_s);
+		post_remove(post);
+		return;
+	}
+
+	post->mtime = st.st_mtime;
+	post->cache = cache_create(st.st_size);
+
+	kore_buf_appendf(&post->cache->buf,
 	    (const char *)asset_post_start_html, post->title, post->title);
+
+	post->clen = 0;
+	post->coff = post->cache->buf.offset;
 
 	for (;;) {
 		bytes = read(fd, buf, sizeof(buf));
@@ -182,15 +252,16 @@ post_cache(struct post *post)
 		if (bytes == 0)
 			break;
 
-		kore_buf_append(post->cache, buf, bytes);
+		post->clen += bytes;
+		kore_buf_append(&post->cache->buf, buf, bytes);
 	}
 
 	close(fd);
 
-	kore_buf_appendf(post->cache,
+	kore_buf_appendf(&post->cache->buf,
 	    (const char *)asset_blog_version_html, BLOG_VER);
 
-	kore_buf_append(post->cache, asset_post_end_html,
+	kore_buf_append(&post->cache->buf, asset_post_end_html,
 	    asset_len_post_end_html);
 }
 
@@ -256,8 +327,9 @@ post_register(char *path)
 void
 post_remove(struct post *post)
 {
+	cache_ref_drop(&post->cache);
+
 	TAILQ_REMOVE(&posts, post, list);
-	kore_buf_free(post->cache);
 	kore_free(post->title);
 	kore_free(post->file);
 	kore_free(post->uri);
@@ -297,20 +369,21 @@ redirect(struct http_request *req)
 int
 post_list(struct http_request *req)
 {
-	return (list_posts(req, "posts", 0));
+	return (list_posts(req, "posts", &live_index, 0));
 }
 
 int
 draft_list(struct http_request *req)
 {
-	return (list_posts(req, "drafts", POST_FLAG_DRAFT));
+	return (list_posts(req, "drafts", &draft_index, POST_FLAG_DRAFT));
 }
 
 int
-list_posts(struct http_request *req, const char *type, int flags)
+list_posts(struct http_request *req, const char *type, struct cache **ptr,
+    int flags)
 {
-	struct kore_buf		buf;
 	struct post		*post;
+	struct cache		*cache;
 
 	if (req->method != HTTP_METHOD_GET) {
 		http_response_header(req, "allow", "get");
@@ -318,23 +391,34 @@ list_posts(struct http_request *req, const char *type, int flags)
 		return (KORE_RESULT_OK);
 	}
 
-	kore_buf_init(&buf, 4096);
-	kore_buf_append(&buf, asset_index_top_html, asset_len_index_top_html);
+	cache = *ptr;
 
-	TAILQ_FOREACH(post, &posts, list) {
-		if (post->flags != flags)
-			continue;
-		kore_buf_appendf(&buf, (const char *)asset_index_entry_html,
-		    type, post->uri, post->title);
+	if (cache == NULL) {
+		cache = cache_create(4096);
+		kore_buf_append(&cache->buf,
+		    asset_index_top_html, asset_len_index_top_html);
+
+		TAILQ_FOREACH(post, &posts, list) {
+			if (post->flags != flags)
+				continue;
+			kore_buf_appendf(&cache->buf,
+			    (const char *)asset_index_entry_html,
+			    type, post->uri, post->title);
+		}
+
+		kore_buf_appendf(&cache->buf,
+		    (const char *)asset_blog_version_html, BLOG_VER);
+		kore_buf_append(&cache->buf,
+		    asset_index_end_html, asset_len_index_end_html);
+
+		*ptr = cache;
 	}
 
-	kore_buf_appendf(&buf, (const char *)asset_blog_version_html, BLOG_VER);
-	kore_buf_append(&buf, asset_index_end_html, asset_len_index_end_html);
+	cache->refs++;
 
 	http_response_header(req, "content-type", "text/html; charset=utf-8");
-	http_response(req, 200, buf.data, buf.offset);
-
-	kore_buf_cleanup(&buf);
+	http_response_stream(req, HTTP_STATUS_OK, cache->buf.data,
+	    cache->buf.offset, cache_sent, cache);
 
 	return (KORE_RESULT_OK);
 }
@@ -393,8 +477,11 @@ post_send(struct http_request *req, const char *path, int flags)
 		return (KORE_RESULT_OK);
 	}
 
+	post->cache->refs++;
+
 	http_response_header(req, "content-type", "text/html; charset=utf-8");
-	http_response(req, 200, post->cache->data, post->cache->offset);
+	http_response_stream(req, HTTP_STATUS_OK, post->cache->buf.data,
+	    post->cache->buf.offset, cache_sent, post->cache);
 
 	return (KORE_RESULT_OK);
 }
