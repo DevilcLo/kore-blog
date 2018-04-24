@@ -25,6 +25,8 @@
 #include <kore/kore.h>
 #include <kore/http.h>
 
+#include <sodium.h>
+
 #include <ctype.h>
 #include <fts.h>
 #include <fcntl.h>
@@ -34,14 +36,33 @@
 
 #include "assets.h"
 
+#define BLOG_SESSION_LEN	32
+
+#define MSG_SESSION_ADD		100
+#define MSG_SESSION_DEL		200
+
 #define BLOG_DIR		"blogs"
 #define BLOG_VER		"kore-blog v0.1"
+#define BLOG_USER_CONF		"users.conf"
 
 #define POST_FLAG_DRAFT		0x0001
 
 struct cache {
 	u_int32_t		refs;
 	struct kore_buf		buf;
+};
+
+struct session {
+	uint32_t		uid;
+	char			data[(BLOG_SESSION_LEN * 2) + 1];
+};
+
+struct user {
+	u_int32_t		uid;
+	char			*name;
+	struct session		session;
+	char			*passphrase;
+	TAILQ_ENTRY(user)	list;
 };
 
 struct post {
@@ -56,6 +77,7 @@ struct post {
 	TAILQ_ENTRY(post)	list;
 };
 
+void	user_reload(void);
 void	index_rebuild(void);
 void	signal_handler(int);
 void	tick(void *, u_int64_t);
@@ -69,6 +91,12 @@ void		post_remove(struct post *);
 int		post_send(struct http_request *, const char *, int);
 void		cache_ref_drop(struct cache **);
 
+int	auth_login(struct http_request *);
+int	auth_user_exists(struct http_request *, char *);
+void	auth_session_add(struct kore_msg *, const void *);
+void	auth_session_del(struct kore_msg *, const void *);
+int	auth_session(struct http_request *, const char *);
+
 int	redirect(struct http_request *);
 int	post_list(struct http_request *);
 int	post_render(struct http_request *);
@@ -78,6 +106,7 @@ int	referer(struct http_request *, const void *);
 int	list_posts(struct http_request *, const char *, struct cache **, int);
 
 static TAILQ_HEAD(, post)	posts;
+static TAILQ_HEAD(, user)	users;
 static volatile sig_atomic_t	blog_sig = -1;
 
 static struct cache		*live_index = NULL;
@@ -95,6 +124,7 @@ tick(void *unused, u_int64_t now)
 	if (blog_sig == SIGHUP) {
 		blog_sig = -1;
 		index_rebuild();
+		user_reload();
 	}
 }
 
@@ -114,7 +144,13 @@ kore_worker_configure(void)
 	(void)kore_timer_add(tick, 1000, NULL, 0);
 
 	TAILQ_INIT(&posts);
+	TAILQ_INIT(&users);
+
 	index_rebuild();
+	user_reload();
+
+	kore_msg_register(MSG_SESSION_ADD, auth_session_add);
+	kore_msg_register(MSG_SESSION_DEL, auth_session_del);
 }
 
 struct cache *
@@ -167,6 +203,64 @@ fts_compare(const FTSENT **a, const FTSENT **b)
 		return (1);
 
 	return (0);
+}
+
+void
+user_reload(void)
+{
+	FILE		*fp;
+	u_int32_t	uids;
+	struct user	*user;
+	int		lineno;
+	char		*line, *pwd, buf[256];
+
+	while (!TAILQ_EMPTY(&users)) {
+		user = TAILQ_FIRST(&users);
+		TAILQ_REMOVE(&users, user, list);
+		kore_free(user->passphrase);
+		kore_free(user->name);
+		kore_free(user);
+	}
+
+	TAILQ_INIT(&users);
+
+	if ((fp = fopen(BLOG_USER_CONF, "r")) == NULL) {
+		if (errno != ENOENT) {
+			kore_log(LOG_INFO,
+			    "fopen(%s): %s", BLOG_USER_CONF, errno_s);
+		}
+		return;
+	}
+
+	uids = 1;
+	lineno = 0;
+
+	while ((line = kore_read_line(fp, buf, sizeof(buf))) != NULL) {
+		lineno++;
+
+		if (*line == '\0')
+			continue;
+
+		if ((pwd = strchr(line, ':')) == NULL) {
+			kore_log(LOG_INFO, "malformed user @ %d", lineno);
+			continue;
+		}
+
+		*(pwd)++ = '\0';
+
+		if (*line == '\0' || *pwd == '\0') {
+			kore_log(LOG_INFO, "malformed user @ %d", lineno);
+			continue;
+		}
+
+		user = kore_calloc(1, sizeof(*user));
+		user->uid = uids++;
+		user->name = kore_strdup(line);
+		user->passphrase = kore_strdup(pwd);
+		TAILQ_INSERT_TAIL(&users, user, list);
+	}
+
+	fclose(fp);
 }
 
 void
@@ -356,6 +450,150 @@ referer(struct http_request *req, const void *unused)
 	kore_log(LOG_NOTICE, "blog (%s) visit from %s", req->path, ref);
 
 	return (KORE_RESULT_OK);
+}
+
+int
+auth_login(struct http_request *req)
+{
+	size_t			i;
+	int			len;
+	struct user		*up;
+	struct session		session;
+	char			*user, *pass;
+	u_int8_t		buf[BLOG_SESSION_LEN];
+
+	if (req->method == HTTP_METHOD_GET)
+		return (asset_serve_login_html(req));
+
+	http_populate_post(req);
+
+	if (!http_argument_get_string(req, "user", &user) ||
+	    !http_argument_get_string(req, "passphrase", &pass)) {
+		req->method = HTTP_METHOD_GET;
+		return (asset_serve_login_html(req));
+	}
+
+	up = NULL;
+	TAILQ_FOREACH(up, &users, list) {
+		if (!strcmp(user, up->name))
+			break;
+	}
+
+	if (up == NULL) {
+		req->method = HTTP_METHOD_GET;
+		kore_log(LOG_INFO, "auth_login: no user data?");
+		return (asset_serve_login_html(req));
+	}
+
+	if (crypto_pwhash_str_verify(up->passphrase, pass, strlen(pass)) != 0) {
+		req->method = HTTP_METHOD_GET;
+		return (asset_serve_login_html(req));
+	}
+
+	session.uid = up->uid;
+	memset(session.data, 0, sizeof(session.data));
+
+	randombytes_buf(buf, sizeof(buf));
+	for (i = 0; i < sizeof(buf); i++) {
+		len = snprintf(session.data + (i * 2),
+		    sizeof(session.data) - (i * 2), "%02x", buf[i]);
+		if (len == -1 || (size_t)len >= sizeof(session.data)) {
+			kore_log(LOG_ERR, "failed to hexify session");
+			req->method = HTTP_METHOD_GET;
+			return (asset_serve_login_html(req));
+		}
+	}
+
+	kore_msg_send(KORE_MSG_WORKER_ALL, MSG_SESSION_ADD,
+	    &session, sizeof(session));
+
+	http_response_header(req, "location", "/drafts/");
+	http_response_cookie(req, "blog_token", session.data,
+	    "/drafts/", 0, 0, NULL);
+
+	kore_log(LOG_INFO, "login for '%s'", up->name);
+	http_response(req, HTTP_STATUS_FOUND, NULL, 0);
+
+	return (KORE_RESULT_OK);
+}
+
+int
+auth_user_exists(struct http_request *req, char *user)
+{
+	struct user	*usr;
+
+	if (user == NULL)
+		return (KORE_RESULT_ERROR);
+
+	TAILQ_FOREACH(usr, &users, list) {
+		if (!strcmp(usr->name, user))
+			return (KORE_RESULT_OK);
+	}
+
+	return (KORE_RESULT_ERROR);
+}
+
+void
+auth_session_add(struct kore_msg *msg, const void *data)
+{
+	struct user		*user;
+	const struct session	*session;
+
+	if (msg->length != sizeof(*session)) {
+		kore_log(LOG_ERR, "auth_session_add: invalid len (%u)",
+		    msg->length);
+		return;
+	}
+
+	session = data;
+
+	TAILQ_FOREACH(user, &users, list) {
+		if (user->uid == session->uid) {
+			memcpy(&user->session, session, sizeof(*session));
+			break;
+		}
+	}
+}
+
+void
+auth_session_del(struct kore_msg *msg, const void *data)
+{
+	u_int32_t	uid;
+	struct user	*user;
+
+	if (msg->length != sizeof(uid)) {
+		kore_log(LOG_ERR, "auth_session_del: invalid len (%u)",
+		    msg->length);
+		return;
+	}
+
+	memcpy(&uid, data, sizeof(uid));
+
+	TAILQ_FOREACH(user, &users, list) {
+		if (user->uid == uid) {
+			memset(&user->session, 0, sizeof(user->session));
+			break;
+		}
+	}
+}
+
+int
+auth_session(struct http_request *req, const char *cookie)
+{
+	struct user	*user;
+
+	if (cookie == NULL)
+		return (KORE_RESULT_ERROR);
+
+	TAILQ_FOREACH(user, &users, list) {
+		if (!strcmp(user->session.data, cookie)) {
+			kore_log(LOG_INFO, "%s requested by %s",
+			    req->path, user->name);
+			return (KORE_RESULT_OK);
+		}
+	}
+
+	return (KORE_RESULT_ERROR);
 }
 
 int
