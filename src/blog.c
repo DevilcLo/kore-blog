@@ -108,6 +108,7 @@ int	list_posts(struct http_request *, const char *, struct cache **, int);
 static TAILQ_HEAD(, post)	posts;
 static TAILQ_HEAD(, user)	users;
 static volatile sig_atomic_t	blog_sig = -1;
+static time_t			user_mtime = 0;
 
 static struct cache		*live_index = NULL;
 static struct cache		*draft_index = NULL;
@@ -208,11 +209,23 @@ fts_compare(const FTSENT **a, const FTSENT **b)
 void
 user_reload(void)
 {
+	struct stat	st;
 	FILE		*fp;
 	u_int32_t	uids;
 	struct user	*user;
 	int		lineno;
 	char		*line, *pwd, buf[256];
+
+	if (stat(BLOG_USER_CONF, &st) == -1) {
+		if (errno != ENOENT) {
+			kore_log(LOG_INFO,
+			    "stat(%s): %s", BLOG_USER_CONF, errno_s);
+		}
+		return;
+	}
+
+	if (user_mtime == st.st_mtime)
+		return;
 
 	while (!TAILQ_EMPTY(&users)) {
 		user = TAILQ_FIRST(&users);
@@ -231,6 +244,8 @@ user_reload(void)
 		}
 		return;
 	}
+
+	kore_log(LOG_INFO, "reloading users");
 
 	uids = 1;
 	lineno = 0;
@@ -261,6 +276,7 @@ user_reload(void)
 	}
 
 	fclose(fp);
+	user_mtime = st.st_mtime;
 }
 
 void
