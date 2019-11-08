@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018 Joris Vink <joris@coders.se>
+ * Copyright (c) 2018-2019 Joris Vink <joris@coders.se>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -42,7 +42,7 @@
 #define MSG_SESSION_DEL		200
 
 #define BLOG_DIR		"blogs"
-#define BLOG_VER		"kore-blog v0.1"
+#define BLOG_VER		"kore-blog v0.2"
 #define BLOG_USER_CONF		"users.conf"
 
 #define POST_FLAG_DRAFT		0x0001
@@ -122,6 +122,9 @@ signal_handler(int sig)
 void
 tick(void *unused, u_int64_t now)
 {
+	(void)now;
+	(void)unused;
+
 	if (blog_sig == SIGHUP) {
 		blog_sig = -1;
 		index_rebuild();
@@ -451,6 +454,8 @@ referer(struct http_request *req, const void *unused)
 {
 	const char		*ref, *p;
 
+	(void)unused;
+
 	if (!http_request_header(req, "referer", &ref))
 		return (KORE_RESULT_OK);
 
@@ -537,6 +542,8 @@ int
 auth_user_exists(struct http_request *req, char *user)
 {
 	struct user	*usr;
+
+	(void)req;
 
 	if (user == NULL)
 		return (KORE_RESULT_ERROR);
