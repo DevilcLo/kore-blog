@@ -563,7 +563,7 @@ auth_session_add(struct kore_msg *msg, const void *data)
 	const struct session	*session;
 
 	if (msg->length != sizeof(*session)) {
-		kore_log(LOG_ERR, "auth_session_add: invalid len (%u)",
+		kore_log(LOG_ERR, "auth_session_add: invalid len (%zu)",
 		    msg->length);
 		return;
 	}
@@ -585,7 +585,7 @@ auth_session_del(struct kore_msg *msg, const void *data)
 	struct user	*user;
 
 	if (msg->length != sizeof(uid)) {
-		kore_log(LOG_ERR, "auth_session_del: invalid len (%u)",
+		kore_log(LOG_ERR, "auth_session_del: invalid len (%zu)",
 		    msg->length);
 		return;
 	}
